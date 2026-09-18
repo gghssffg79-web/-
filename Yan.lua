@@ -2,139 +2,211 @@ local gpu = require("component").gpu
 local event = require("event")
 local computer = require("computer")
 
--- Настройки
-local WIDTH, HEIGHT = gpu.getResolution()
-local CHARS = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-local FALL_SPEED = 0.05  -- скорость падения (меньше = быстрее)
-local FADE_SPEED = 0.1   -- скорость затухания следов
+-- Разрешение экрана
+local W, H = gpu.getResolution()
+if W < 40 then W = 40 end
+if H < 20 then H = 20 end
+gpu.setResolution(W, H)
 
--- Цвета
-local C_BG = 0x000000
-local C_HEAD = 0x00FF00      -- яркий зелёный (голова)
-local C_BODY = 0x00AA00      -- средний зелёный (тело)
-local C_TAIL = 0x005500      -- тёмный зелёный (хвост)
-local C_FADE = 0x002200      -- очень тёмный (затухание)
+-- Символы как в фильме (катакана + цифры + буквы)
+local CHARS = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEF"
 
--- Состояние колонок
-local columns = {}
-local drops = {}
-local trails = {}
+-- === НАСТРОЙКИ ===
+local STREAM_COUNT = math.floor(W * 0.7)  -- количество потоков
+local MIN_LENGTH = 5                       -- минимальная длина следа
+local MAX_LENGTH = 15                      -- максимальная длина следа
+local SPEED_MIN = 1                        -- минимальная скорость
+local SPEED_MAX = 3                        -- максимальная скорость
+local GLOW_CHANCE = 0.05                   -- шанс случайного свечения
+
+-- === СОСТОЯНИЕ ===
+local streams = {}
+local grid = {}  -- grid[x][y] = {char, brightness}
 
 local function init()
-  gpu.setBackground(C_BG)
-  gpu.fill(1, 1, WIDTH, HEIGHT, " ")
+  gpu.setBackground(0x000000)
+  gpu.fill(1, 1, W, H, " ")
   
-  for x = 1, WIDTH do
-    columns[x] = {
-      y = math.random(1, HEIGHT),
-      speed = math.random(1, 3) * 0.5,
-      counter = 0
-    }
-    drops[x] = 0
-    trails[x] = {}
-    for y = 1, HEIGHT do
-      trails[x][y] = 0
+  -- Инициализация сетки
+  for x = 1, W do
+    grid[x] = {}
+    for y = 1, H do
+      grid[x][y] = {char = " ", brightness = 0}
     end
+  end
+  
+  -- Создаём потоки
+  for i = 1, STREAM_COUNT do
+    table.insert(streams, {
+      x = math.random(1, W),
+      y = math.random(-20, -1),  -- начинаются выше экрана
+      length = math.random(MIN_LENGTH, MAX_LENGTH),
+      speed = math.random(SPEED_MIN, SPEED_MAX) / 10,
+      timer = 0,
+      active = true
+    })
   end
 end
 
-local function getRandomChar()
-  local idx = math.random(1, #CHARS)
-  return CHARS:sub(idx, idx)
+local function randomChar()
+  return CHARS:sub(math.random(1, #CHARS), math.random(1, #CHARS))
 end
 
 local function update()
-  for x = 1, WIDTH do
-    local col = columns[x]
-    col.counter = col.counter + 1
+  -- Обновляем каждый поток
+  for _, stream in ipairs(streams) do
+    if not stream.active then
+      -- Перезапуск потока
+      stream.y = math.random(-10, -1)
+      stream.x = math.random(1, W)
+      stream.length = math.random(MIN_LENGTH, MAX_LENGTH)
+      stream.speed = math.random(SPEED_MIN, SPEED_MAX) / 10
+      stream.active = true
+      stream.timer = 0
+    end
     
-    if col.counter >= col.speed then
-      col.counter = 0
+    stream.timer = stream.timer + 1
+    
+    if stream.timer >= stream.speed then
+      stream.timer = 0
       
-      -- Сдвигаем следы вниз
-      for y = HEIGHT, 2, -1 do
-        trails[x][y] = trails[x][y-1]
+      -- Двигаем голову вниз
+      stream.y = stream.y + 1
+      
+      -- Если голова ушла за экран — деактивируем
+      if stream.y - stream.length > H then
+        stream.active = false
       end
-      trails[x][1] = 0
-      
-      -- Новая голова
-      drops[x] = col.y
-      col.y = col.y + 1
-      
-      if col.y > HEIGHT + 5 then
-        col.y = math.random(-5, 0)
-        col.speed = math.random(1, 3) * 0.5
+    end
+  end
+  
+  -- Обновляем сетку
+  for x = 1, W do
+    for y = 1, H do
+      -- Уменьшаем яркость (затухание)
+      if grid[x][y].brightness > 0 then
+        grid[x][y].brightness = grid[x][y].brightness - 0.15
+        if grid[x][y].brightness < 0 then
+          grid[x][y].brightness = 0
+        end
+        -- Случайное мерцание символов
+        if math.random() < 0.3 then
+          grid[x][y].char = randomChar()
+        end
       end
+    end
+  end
+  
+  -- Рисуем потоки на сетке
+  for _, stream in ipairs(streams) do
+    if stream.active then
+      for i = 0, stream.length - 1 do
+        local y = stream.y - i
+        if y >= 1 and y <= H and stream.x >= 1 and stream.x <= W then
+          local brightness = 1.0 - (i / stream.length)
+          if brightness < 0 then brightness = 0 end
+          
+          grid[stream.x][y].brightness = brightness
+          grid[stream.x][y].char = randomChar()
+        end
+      end
+    end
+  end
+  
+  -- Случайные вспышки (glitch эффект)
+  for _ = 1, 2 do
+    local gx = math.random(1, W)
+    local gy = math.random(1, H)
+    if math.random() < GLOW_CHANCE then
+      grid[gx][gy].brightness = 1.0
+      grid[gx][gy].char = randomChar()
     end
   end
 end
 
 local function draw()
-  for x = 1, WIDTH do
-    local col = columns[x]
-    local headY = col.y - 1
-    
-    -- Рисуем голову (яркий символ)
-    if headY >= 1 and headY <= HEIGHT then
-      local char = getRandomChar()
-      gpu.setBackground(C_HEAD)
-      gpu.setForeground(C_HEAD)
-      gpu.set(x, headY, char)
-      trails[x][headY] = 3
-    end
-    
-    -- Рисуем следы
-    for y = 1, HEIGHT do
-      local fade = trails[x][y]
-      if fade > 0 then
-        local char = getRandomChar()
-        if fade == 3 then
-          gpu.setBackground(C_BODY)
-          gpu.setForeground(C_BODY)
-        elseif fade == 2 then
-          gpu.setBackground(C_TAIL)
-          gpu.setForeground(C_TAIL)
+  for x = 1, W do
+    for y = 1, H do
+      local cell = grid[x][y]
+      local b = cell.brightness
+      
+      if b > 0 then
+        local bg, fg, char
+        
+        if b >= 0.9 then
+          -- Голова — белый/ярко-зелёный
+          bg = 0x000000
+          fg = 0xFFFFFF
+          char = cell.char
+        elseif b >= 0.7 then
+          -- Яркий зелёный
+          bg = 0x000000
+          fg = 0x00FF00
+          char = cell.char
+        elseif b >= 0.5 then
+          -- Средний зелёный
+          bg = 0x000000
+          fg = 0x00CC00
+          char = cell.char
+        elseif b >= 0.3 then
+          -- Тёмный зелёный
+          bg = 0x000000
+          fg = 0x008800
+          char = cell.char
+        elseif b >= 0.1 then
+          -- Очень тёмный
+          bg = 0x000000
+          fg = 0x004400
+          char = cell.char
         else
-          gpu.setBackground(C_FADE)
-          gpu.setForeground(C_FADE)
+          -- Почти невидимый
+          bg = 0x000000
+          fg = 0x001100
+          char = cell.char
         end
+        
+        gpu.setBackground(bg)
+        gpu.setForeground(fg)
         gpu.set(x, y, char)
-        trails[x][y] = fade - 1
+      else
+        gpu.setBackground(0x000000)
+        gpu.setForeground(0x000000)
+        gpu.set(x, y, " ")
       end
     end
   end
 end
 
-local function clearScreen()
-  gpu.setBackground(C_BG)
-  gpu.setForeground(C_BG)
-  gpu.fill(1, 1, WIDTH, HEIGHT, " ")
-end
-
--- Главный цикл
+-- === ГЛАВНЫЙ ЦИКЛ ===
 init()
 
 local running = true
+local frameCount = 0
+
 while running do
   update()
   draw()
+  frameCount = frameCount + 1
   
-  -- Проверяем события
-  local ev = {event.pull(0)}
-  if ev[1] == "key_down" then
-    local ch = ev[4]
-    if ch == "q" or ch == "Q" then
+  -- Проверяем ввод каждые 10 кадров (оптимизация)
+  if frameCount % 10 == 0 then
+    local ev = {event.pull(0)}
+    if ev[1] == "key_down" then
+      local ch = ev[4]
+      if ch == "q" or ch == "Q" then
+        running = false
+      end
+    elseif ev[1] == "touch" then
       running = false
     end
-  elseif ev[1] == "touch" then
-    running = false
   end
   
-  os.sleep(FALL_SPEED)
+  os.sleep(0.05)  -- 20 FPS
 end
 
-clearScreen()
-gpu.setForeground(0x00FF00)
+-- Очистка экрана
 gpu.setBackground(0x000000)
-gpu.set(1, 1, "Matrix terminated. Press any key...")
+gpu.fill(1, 1, W, H, " ")
+gpu.setForeground(0x00FF00)
+gpu.set(1, 1, "Matrix terminated. Press any key to exit...")
 event.pull("key_down")
